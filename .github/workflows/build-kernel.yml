@@ -1,0 +1,97 @@
+name: Build Tundra kernel w/ KVM (Image.gz-dtb)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      ARCH: arm64
+      OUTDIR: out
+      KERNEL_REPO: https://github.com/MotorolaMobilityLLC/kernel-msm.git
+      KERNEL_BRANCH: android-13-release-ttz   # fallback branch; edit if your device needs different tag
+    steps:
+      - name: Checkout this repo (contains user_config)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev curl ccache \
+            device-tree-compiler python3-pip unzip libncurses-dev wget make git \
+            libelf-dev u-boot-tools
+          pip3 install pyelftools
+
+      - name: Fetch AOSP clang
+        run: |
+          mkdir -p toolchain
+          cd toolchain
+          # best-effort small clang; if this URL expires, edit to another clang tarball in the repo
+          wget -q https://storage.googleapis.com/android-releases/clang/clang-r450784d.tar.xz -O clang.tar.xz || true
+          tar -xf clang.tar.xz || true
+          ls -l
+
+      - name: Clone Motorola kernel tree
+        run: |
+          git clone --depth 1 --branch ${KERNEL_BRANCH} ${KERNEL_REPO} kernel-msm || git clone --depth 1 ${KERNEL_REPO} kernel-msm
+          cd kernel-msm
+          git rev-parse --abbrev-ref HEAD || true
+          ls -la
+
+      - name: Prepare .config (use your uploaded user_config)
+        run: |
+          # copy user-provided config into kernel root
+          cp ../user_config kernel-msm/.config
+          cd kernel-msm
+          # ensure scripts/config exists (kernel build scripts)
+          chmod +x scripts/config || true
+          # set the KVM/virt options we need (will add or change)
+          scripts/config --enable CONFIG_VIRTUALIZATION || true
+          scripts/config --enable CONFIG_KVM || true
+          scripts/config --enable CONFIG_KVM_ARM_HOST || true
+          scripts/config --enable CONFIG_KVM_MMIO || true
+          scripts/config --enable CONFIG_KVM_VFIO || true
+          scripts/config --enable CONFIG_ARM_GIC || true
+          scripts/config --enable CONFIG_ARM_GIC_V3 || true
+          scripts/config --enable CONFIG_ARM_ARCH_TIMER || true
+          # settle missing symbols
+          make O=${OUTDIR} ARCH=${ARCH} olddefconfig || make O=${OUTDIR} ARCH=${ARCH} defconfig || true
+
+      - name: Build kernel (Image)
+        env:
+          PATH: ${{ github.workspace }}/toolchain/clang/bin:${{ env.PATH }}
+        run: |
+          cd kernel-msm
+          export PATH=$PWD/../toolchain/clang/bin:$PATH
+          make O=${OUTDIR} ARCH=arm64 -j$(nproc) CC=clang HOSTCC=gcc || true
+          # look for the generated image
+          ls -la ${OUTDIR}/arch/arm64/boot || true
+          ls -la ${OUTDIR}/arch/arm64/boot/*
+
+      - name: Collect Image.gz-dtb or Image.gz
+        run: |
+          cd kernel-msm
+          # try common generated kernel artifacts
+          if [ -f ${OUTDIR}/arch/arm64/boot/Image.gz-dtb ]; then
+            cp ${OUTDIR}/arch/arm64/boot/Image.gz-dtb $GITHUB_WORKSPACE/Image.gz-dtb
+          elif [ -f ${OUTDIR}/arch/arm64/boot/Image.gz ]; then
+            cp ${OUTDIR}/arch/arm64/boot/Image.gz $GITHUB_WORKSPACE/Image.gz
+          elif [ -f ${OUTDIR}/arch/arm64/boot/Image ]; then
+            gzip -c ${OUTDIR}/arch/arm64/boot/Image > $GITHUB_WORKSPACE/Image.gz
+          else
+            echo "No kernel Image found in outdir; list files:" && ls -la ${OUTDIR}/arch/arm64/boot || true
+            exit 1
+          fi
+          ls -la $GITHUB_WORKSPACE/
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: |
+            Image.gz-dtb
+            Image.gz
+            
