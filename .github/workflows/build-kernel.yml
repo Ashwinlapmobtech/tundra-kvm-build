@@ -25,13 +25,12 @@ jobs:
             libelf-dev u-boot-tools
           pip3 install pyelftools
 
-      - name: Fetch AOSP clang
+      - name: Fetch AOSP clang (14.x stable)
         run: |
           mkdir -p toolchain
           cd toolchain
-          # best-effort small clang; if this URL expires, edit to another clang tarball in the repo
-          wget -q https://storage.googleapis.com/android-releases/clang/clang-r450784d.tar.xz -O clang.tar.xz || true
-          tar -xf clang.tar.xz || true
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183b1.tar.gz -O clang.tar.gz
+          tar -xf clang.tar.gz
           ls -l
 
       - name: Clone Motorola kernel tree
@@ -43,12 +42,9 @@ jobs:
 
       - name: Prepare .config (use your uploaded user_config)
         run: |
-          # copy user-provided config into kernel root
           cp ./user_config kernel-msm/.config
           cd kernel-msm
-          # ensure scripts/config exists (kernel build scripts)
           chmod +x scripts/config || true
-          # set the KVM/virt options we need (will add or change)
           scripts/config --enable CONFIG_VIRTUALIZATION || true
           scripts/config --enable CONFIG_KVM || true
           scripts/config --enable CONFIG_KVM_ARM_HOST || true
@@ -57,7 +53,6 @@ jobs:
           scripts/config --enable CONFIG_ARM_GIC || true
           scripts/config --enable CONFIG_ARM_GIC_V3 || true
           scripts/config --enable CONFIG_ARM_ARCH_TIMER || true
-          # settle missing symbols
           make O=${OUTDIR} ARCH=${ARCH} olddefconfig || make O=${OUTDIR} ARCH=${ARCH} defconfig || true
 
       - name: Build kernel (Image)
@@ -67,14 +62,12 @@ jobs:
           cd kernel-msm
           export PATH=$PWD/../toolchain/clang/bin:$PATH
           make O=${OUTDIR} ARCH=arm64 -j$(nproc) CC=clang HOSTCC=gcc || true
-          # look for the generated image
           ls -la ${OUTDIR}/arch/arm64/boot || true
           ls -la ${OUTDIR}/arch/arm64/boot/*
 
       - name: Collect Image.gz-dtb or Image.gz
         run: |
           cd kernel-msm
-          # try common generated kernel artifacts
           if [ -f ${OUTDIR}/arch/arm64/boot/Image.gz-dtb ]; then
             cp ${OUTDIR}/arch/arm64/boot/Image.gz-dtb $GITHUB_WORKSPACE/Image.gz-dtb
           elif [ -f ${OUTDIR}/arch/arm64/boot/Image.gz ]; then
@@ -94,4 +87,3 @@ jobs:
           path: |
             Image.gz-dtb
             Image.gz
-            
