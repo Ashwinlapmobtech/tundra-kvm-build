@@ -10,7 +10,7 @@ jobs:
       ARCH: arm64
       OUTDIR: out
       KERNEL_REPO: https://github.com/MotorolaMobilityLLC/kernel-msm.git
-      KERNEL_BRANCH: android-13-release-ttz   # fallback branch; edit if your device needs different tag
+      KERNEL_BRANCH: android-13-release-ttz   # change if your device needs a different tag/branch
     steps:
       - name: Checkout this repo (contains user_config)
         uses: actions/checkout@v4
@@ -22,63 +22,81 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison libssl-dev curl ccache \
             device-tree-compiler python3-pip unzip libncurses-dev wget make git \
-            libelf-dev u-boot-tools
+            libelf-dev u-boot-tools xz-utils
           pip3 install pyelftools
 
-      - name: Fetch AOSP clang (14.x stable)
+      # ---------- FIXED: robust Clang download & extract ----------
+      - name: Setup Clang toolchain (LLVM 17, Linux x86_64)
         run: |
+          set -euo pipefail
           mkdir -p toolchain
-          cd toolchain
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r416183b1.tar.gz -O clang.tar.gz
-          tar -xf clang.tar.gz
-          ls -l
+          URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-20.04.tar.xz"
+          echo "Downloading: $URL"
+          curl -L --fail --retry 3 "$URL" -o /tmp/clang.tar.xz
+          # sanity check: file must be > 10 MB
+          size=$(stat -c%s /tmp/clang.tar.xz); echo "Downloaded bytes: $size"; [ "$size" -gt 10000000 ]
+          # extract (.tar.xz -> use -J)
+          tar -xJf /tmp/clang.tar.xz -C toolchain --strip-components=1
+          test -x toolchain/bin/clang
+          # add to PATH for all subsequent steps
+          echo "$PWD/toolchain/bin" >> "$GITHUB_PATH"
+          clang --version
 
       - name: Clone Motorola kernel tree
         run: |
-          git clone --depth 1 --branch ${KERNEL_BRANCH} ${KERNEL_REPO} kernel-msm || git clone --depth 1 ${KERNEL_REPO} kernel-msm
+          set -e
+          git clone --depth 1 --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel-msm || \
+          git clone --depth 1 "${KERNEL_REPO}" kernel-msm
           cd kernel-msm
           git rev-parse --abbrev-ref HEAD || true
           ls -la
 
       - name: Prepare .config (use your uploaded user_config)
         run: |
+          set -e
+          # copy user-provided config into kernel root
           cp ./user_config kernel-msm/.config
           cd kernel-msm
+          # ensure scripts/config exists
           chmod +x scripts/config || true
+          # enable virtualization / KVM (arm64 host)
           scripts/config --enable CONFIG_VIRTUALIZATION || true
           scripts/config --enable CONFIG_KVM || true
           scripts/config --enable CONFIG_KVM_ARM_HOST || true
           scripts/config --enable CONFIG_KVM_MMIO || true
-          scripts/config --enable CONFIG_KVM_VFIO || true
           scripts/config --enable CONFIG_ARM_GIC || true
           scripts/config --enable CONFIG_ARM_GIC_V3 || true
           scripts/config --enable CONFIG_ARM_ARCH_TIMER || true
-          make O=${OUTDIR} ARCH=${ARCH} olddefconfig || make O=${OUTDIR} ARCH=${ARCH} defconfig || true
+          # resolve any missing symbols
+          make O="${OUTDIR}" ARCH="${ARCH}" olddefconfig || make O="${OUTDIR}" ARCH="${ARCH}" defconfig
 
       - name: Build kernel (Image)
-        env:
-          PATH: ${{ github.workspace }}/toolchain/clang/bin:${{ env.PATH }}
         run: |
+          set -e
           cd kernel-msm
-          export PATH=$PWD/../toolchain/clang/bin:$PATH
-          make O=${OUTDIR} ARCH=arm64 -j$(nproc) CC=clang HOSTCC=gcc || true
-          ls -la ${OUTDIR}/arch/arm64/boot || true
-          ls -la ${OUTDIR}/arch/arm64/boot/*
+          # clang now in PATH via GITHUB_PATH
+          clang --version
+          make O="${OUTDIR}" ARCH=arm64 -j"$(nproc)" CC=clang
+          # list possible outputs
+          ls -la "${OUTDIR}/arch/arm64/boot" || true
+          ls -la "${OUTDIR}/arch/arm64/boot/"* || true
 
       - name: Collect Image.gz-dtb or Image.gz
         run: |
+          set -e
           cd kernel-msm
-          if [ -f ${OUTDIR}/arch/arm64/boot/Image.gz-dtb ]; then
-            cp ${OUTDIR}/arch/arm64/boot/Image.gz-dtb $GITHUB_WORKSPACE/Image.gz-dtb
-          elif [ -f ${OUTDIR}/arch/arm64/boot/Image.gz ]; then
-            cp ${OUTDIR}/arch/arm64/boot/Image.gz $GITHUB_WORKSPACE/Image.gz
-          elif [ -f ${OUTDIR}/arch/arm64/boot/Image ]; then
-            gzip -c ${OUTDIR}/arch/arm64/boot/Image > $GITHUB_WORKSPACE/Image.gz
+          if [ -f "${OUTDIR}/arch/arm64/boot/Image.gz-dtb" ]; then
+            cp "${OUTDIR}/arch/arm64/boot/Image.gz-dtb" "$GITHUB_WORKSPACE/Image.gz-dtb"
+          elif [ -f "${OUTDIR}/arch/arm64/boot/Image.gz" ]; then
+            cp "${OUTDIR}/arch/arm64/boot/Image.gz" "$GITHUB_WORKSPACE/Image.gz"
+          elif [ -f "${OUTDIR}/arch/arm64/boot/Image" ]; then
+            gzip -c "${OUTDIR}/arch/arm64/boot/Image" > "$GITHUB_WORKSPACE/Image.gz"
           else
-            echo "No kernel Image found in outdir; list files:" && ls -la ${OUTDIR}/arch/arm64/boot || true
+            echo "No kernel Image found in outdir; listing files:"
+            ls -la "${OUTDIR}/arch/arm64/boot" || true
             exit 1
           fi
-          ls -la $GITHUB_WORKSPACE/
+          ls -la "$GITHUB_WORKSPACE/"
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
@@ -87,3 +105,4 @@ jobs:
           path: |
             Image.gz-dtb
             Image.gz
+          if-no-files-found: ignore
