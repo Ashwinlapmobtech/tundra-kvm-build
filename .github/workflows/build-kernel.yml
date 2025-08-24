@@ -44,7 +44,7 @@ jobs:
       - name: Prepare .config (use your uploaded user_config)
         run: |
           # copy user-provided config into kernel root
-          cp ../user_config kernel-msm/.config
+          cp ./user_config kernel-msm/.config
           cd kernel-msm
           # ensure scripts/config exists (kernel build scripts)
           chmod +x scripts/config || true
